@@ -158,6 +158,10 @@ h1 {
   cursor: pointer;
 }
 
+.ghost input[type='file'] {
+  display: none;
+}
+
 .primary {
   background: var(--accent);
   border-color: var(--accent);
@@ -225,6 +229,32 @@ h1 {
   margin-bottom: 20px;
 }
 
+.upload-meta {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.upload-meta label {
+  display: grid;
+  gap: 6px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.upload-meta input[type='text'] {
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  font-family: 'Space Grotesk', sans-serif;
+}
+
+.status-message {
+  margin: 0;
+  font-size: 0.9rem;
+  color: #a22525;
+}
+
 .upload-title {
   margin: 0 0 4px;
   font-weight: 600;
@@ -286,6 +316,22 @@ select {
 .mapping-hint {
   font-size: 0.8rem;
   color: var(--muted);
+}
+
+.error-table {
+  display: grid;
+  gap: 12px;
+}
+
+.error-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.05);
+  gap: 16px;
 }
 
 .checklist {

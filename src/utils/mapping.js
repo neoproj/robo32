@@ -5,7 +5,7 @@ export function suggestMapping(columnName) {
 
   const normalized = columnName.toUpperCase();
 
-  if (normalized.includes('PROD') || normalized.includes('ANT')) {
+  if (normalized.includes('COD') || normalized.includes('ANT')) {
     return 'cd_produto_antecessor';
   }
 

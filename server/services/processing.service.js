@@ -1,5 +1,6 @@
 import { getOracleConnection } from '../config/database.js';
 import { cloneProdutoOracle } from './oracle-clone.service.js';
+import { clearSuccessAntecessorFromRolledBackJobs } from './job.service.js';
 
 export async function processarPlanilha({ jobId, rows, mapping, user, oraclePool, auditPool }) {
   let oracleConn;
@@ -22,28 +23,58 @@ export async function processarPlanilha({ jobId, rows, mapping, user, oraclePool
     const totalRows = rows.length;
     console.log(`\n[PROCESSAMENTO] Iniciando processamento de ${totalRows} produto(s)...\n`);
 
+    const antecessoresProcessadosNesteJob = new Set();
+
+    function parseNumber(value) {
+    if (value === null || value === undefined || value === '') return NaN;
+    const n = Number(String(value).trim().replace(',', '.'));
+    return Number.isFinite(n) ? n : NaN;
+  }
+
     for (const [index, row] of rows.entries()) {
-      const antecessor = row[mapping.cd_produto_antecessor];
-      const novaEsp = row[mapping.cd_especie];
-      const novaCla = row[mapping.cd_classe];
-      const novaSub = row[mapping.cd_sub_cla];
+      const rawAntecessor = row[mapping.cd_produto_antecessor];
+      const rawNovaEsp = row[mapping.cd_especie];
+      const rawNovaCla = row[mapping.cd_classe];
+      const rawNovaSub = row[mapping.cd_sub_cla];
+
+      const antecessor = parseNumber(rawAntecessor, 'antecessor');
+      const novaEsp = parseNumber(rawNovaEsp, 'especie');
+      const novaCla = parseNumber(rawNovaCla, 'classe');
+      const novaSub = parseNumber(rawNovaSub, 'subclasse');
 
       const progresso = `[${index + 1}/${totalRows}]`;
-      console.log(`\n${progresso} Processando produto ${antecessor}...`);
+      console.log(`\n${progresso} Processando produto ${rawAntecessor}...`);
 
       try {
-        // Duplicidade histórica (auditoria)
+        if (!Number.isFinite(antecessor) || antecessor <= 0) {
+          throw new Error(`Linha ${index + 1}: cd_produto_antecessor inválido (valor: "${rawAntecessor}"). Deve ser um número.`);
+        }
+        if (!Number.isFinite(novaEsp) || !Number.isFinite(novaCla) || !Number.isFinite(novaSub)) {
+          throw new Error(`Linha ${index + 1}: espécie/classe/subclasse inválidos. Valores: esp=${rawNovaEsp}, cla=${rawNovaCla}, sub=${rawNovaSub}. Devem ser números.`);
+        }
+
+        if (antecessoresProcessadosNesteJob.has(antecessor)) {
+          throw new Error(`Duplicado na mesma planilha: antecessor ${antecessor} já processado em linha anterior.`);
+        }
+
+        // Duplicidade histórica: só bloqueia se já foi processado com sucesso em um job que NÃO teve rollback
         const hist = await auditPool.execute(
-          `SELECT id
-             FROM AUDIT_PRODUTO
-            WHERE success_antecessor = ?
-              AND status = 'SUCCESS'
+          `SELECT p.job_id, j.filename
+             FROM AUDIT_PRODUTO p
+             INNER JOIN AUDIT_JOB j ON j.id = p.job_id
+            WHERE p.success_antecessor = ?
+              AND p.status = 'SUCCESS'
+              AND NOT EXISTS (
+                SELECT 1 FROM AUDIT_ROLLBACK r WHERE r.job_id = p.job_id
+              )
             LIMIT 1`,
           [antecessor]
         );
 
         if (hist?.[0]) {
-          throw new Error('DUPLICADO_HISTORICO');
+          const { job_id, filename } = hist[0];
+          const msg = `Duplicado: já processado no JOB-${job_id} (arquivo: ${filename || '—'})`;
+          throw new Error(msg);
         }
 
         // Clone (sem commits internos)
@@ -57,19 +88,66 @@ export async function processarPlanilha({ jobId, rows, mapping, user, oraclePool
 
         await oracleConn.commit();
 
-        await registrarAuditoria(auditPool, {
-          job_id: jobId,
-          row: index + 1,
-          antecessor,
-          novo: novoCd,
-          status: 'SUCCESS',
-          error: null,
-          esp: novaEsp,
-          cla: novaCla,
-          sub: novaSub,
-          user
-        });
+        let auditOk = false;
+        try {
+          await registrarAuditoria(auditPool, {
+            job_id: jobId,
+            row: index + 1,
+            antecessor,
+            novo: novoCd,
+            status: 'SUCCESS',
+            error: null,
+            esp: novaEsp,
+            cla: novaCla,
+            sub: novaSub,
+            user
+          });
+          auditOk = true;
+        } catch (auditErr) {
+          const errMsg = String(auditErr?.message ?? '');
+            const isDupKey =
+              auditErr?.errno === 1062 ||
+              auditErr?.code === 'ER_DUP_ENTRY' ||
+              errMsg.includes('uk_audit_produto_success_antecessor') ||
+              errMsg.includes("Duplicate entry") ||
+              errMsg.includes('1062');
+          if (isDupKey) {
+            await clearSuccessAntecessorFromRolledBackJobs(auditPool, antecessor);
+            try {
+              await registrarAuditoria(auditPool, {
+                job_id: jobId,
+                row: index + 1,
+                antecessor,
+                novo: novoCd,
+                status: 'SUCCESS',
+                error: null,
+                esp: novaEsp,
+                cla: novaCla,
+                sub: novaSub,
+                user
+              });
+              auditOk = true;
+            } catch (retryErr) {
+              await registrarAuditoria(auditPool, {
+                job_id: jobId,
+                row: index + 1,
+                antecessor,
+                novo: novoCd,
+                status: 'SUCCESS',
+                error: 'Antecessor já utilizado em outro job (registro sem success_antecessor).',
+                esp: novaEsp,
+                cla: novaCla,
+                sub: novaSub,
+                user,
+                skipSuccessAntecessor: true
+              });
+              auditOk = true;
+            }
+          }
+          if (!auditOk) throw auditErr;
+        }
 
+        antecessoresProcessadosNesteJob.add(antecessor);
         console.log(`${progresso} ✓ OK -> novo produto: ${novoCd}`);
       } catch (err) {
         try {
@@ -77,13 +155,17 @@ export async function processarPlanilha({ jobId, rows, mapping, user, oraclePool
         } catch (_) {}
 
         const message = err?.message ?? 'ERROR_ORACLE';
+        const isDuplicado =
+          message === 'DUPLICADO_HISTORICO' ||
+          message.startsWith('Duplicado:') ||
+          message.startsWith('Duplicado na mesma planilha:');
 
         await registrarAuditoria(auditPool, {
           job_id: jobId,
           row: index + 1,
           antecessor,
           novo: null,
-          status: message === 'DUPLICADO_HISTORICO' ? 'DUPLICADO_HISTORICO' : 'ERROR_ORACLE',
+          status: isDuplicado ? 'DUPLICADO_HISTORICO' : 'ERROR_ORACLE',
           error: message,
           esp: novaEsp,
           cla: novaCla,
@@ -142,6 +224,6 @@ async function registrarAuditoria(auditPool, d) {
     d.esp,
     d.cla,
     d.sub,
-    d.status === 'SUCCESS' ? d.antecessor : null
+    d.skipSuccessAntecessor ? null : (d.status === 'SUCCESS' ? d.antecessor : null)
   ]);
 }

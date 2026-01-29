@@ -255,6 +255,19 @@ h1 {
   color: #a22525;
 }
 
+.upload-validation-errors {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  font-size: 0.85rem;
+  color: #a22525;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.upload-validation-errors li {
+  margin-bottom: 4px;
+}
+
 .upload-title {
   margin: 0 0 4px;
   font-weight: 600;
@@ -359,6 +372,182 @@ select {
   font-size: 0.75rem;
   color: #a22525;
   font-family: 'DM Mono', monospace;
+}
+
+/* Modal Desfazer */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 24px;
+}
+
+.modal-box {
+  background: var(--card);
+  border-radius: 20px;
+  padding: 28px;
+  max-width: 420px;
+  width: 100%;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.25);
+}
+
+.modal-box h3 {
+  margin: 0 0 16px;
+  font-size: 1.25rem;
+}
+
+.modal-box p {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.modal-box select {
+  width: 100%;
+  margin-bottom: 16px;
+  padding: 10px 14px;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+  margin-top: 20px;
+}
+
+.modal-actions .ghost {
+  margin: 0;
+}
+
+.modal-actions .primary,
+.modal-actions .danger {
+  margin: 0;
+}
+
+.modal-actions .danger {
+  background: var(--accent-2);
+  color: #fff;
+  border: none;
+}
+
+.modal-actions .danger:hover:not(:disabled) {
+  background: #c23a3a;
+}
+
+.modal-rollback-message {
+  margin-top: 12px;
+  font-size: 0.9rem;
+}
+
+.modal-rollback-message.ok {
+  color: #0d7a4a;
+}
+
+.modal-rollback-message.err {
+  color: #a22525;
+}
+
+/* Abas e Configuração */
+.tabs-nav {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.tabs-nav .tab {
+  padding: 10px 18px;
+  border: none;
+  background: transparent;
+  border-radius: 12px;
+  font-family: inherit;
+  font-size: 0.95rem;
+  color: var(--muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tabs-nav .tab:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--ink);
+}
+
+.tabs-nav .tab.active {
+  background: var(--card);
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.tab-icon {
+  font-size: 1.1rem;
+}
+
+.config-panel {
+  max-width: 560px;
+}
+
+.config-hint {
+  margin: 0 0 20px;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.config-form .config-row {
+  margin-bottom: 16px;
+}
+
+.config-form .config-row label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.config-form .config-row input {
+  width: 100%;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(0, 0, 0, 0.2);
+  font-family: 'DM Mono', monospace;
+  font-size: 0.95rem;
+}
+
+.config-form .config-row input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(242, 183, 5, 0.2);
+}
+
+.config-actions {
+  margin-top: 24px;
+}
+
+.config-save-msg {
+  margin-top: 12px;
+  font-size: 0.9rem;
+}
+
+.config-save-msg.ok {
+  color: #0d7a4a;
+}
+
+.config-save-msg.err {
+  color: #a22525;
+}
+
+.config-password-input {
+  width: 100%;
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(0, 0, 0, 0.2);
 }
 
 @media (max-width: 900px) {

@@ -21,9 +21,16 @@ import {
   createJob,
   updateJobStatus,
   cancelJob,
-  getAllProcessingJobs
+  getAllProcessingJobs,
+  getJobsEligibleForRollback,
+  getJobNewProductIds,
+  insertRollbackAudit,
+  clearSuccessAntecessorForJob
 } from './services/job.service.js';
 import { processarPlanilha } from './services/processing.service.js';
+import { executeRollbackOracle } from './services/rollback.service.js';
+import { getConfigForEdit, updateEnvFile } from './services/config.service.js';
+import { validateLayout } from './services/upload-validation.service.js';
 
 dotenv.config();
 
@@ -35,6 +42,11 @@ const jsonReplacer = (key, value) => (typeof value === 'bigint' ? value.toString
 app.set('json replacer', jsonReplacer);
 
 const upload = multer({ dest: 'uploads' });
+
+// Rota de saúde (para confirmar que é este servidor e que a API está ativa)
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true, config: true });
+});
 
 // reforço (não atrapalha)
 oracledb.outFormat = oracledb.OUT_FORMAT_OBJECT;
@@ -186,6 +198,130 @@ app.get('/api/jobs/:jobId/details', async (req, res) => {
   }
 });
 
+function requireConfigPassword(req, res) {
+  const expected = process.env.CONFIG_PASSWORD;
+  if (!expected || expected === '') {
+    return res.status(503).json({
+      error: 'Configuração desabilitada. Defina CONFIG_PASSWORD no arquivo .env.'
+    });
+  }
+  const password = req.body?.password ?? req.headers['x-config-password'] ?? '';
+  if (password !== expected) {
+    return res.status(401).json({ error: 'Senha incorreta.' });
+  }
+  return null;
+}
+
+/** Verifica senha de administrador para acessar a aba de configuração. */
+app.post('/api/config/verify', (req, res) => {
+  const err = requireConfigPassword(req, res);
+  if (err) return err;
+  return jsonSafe(res, { ok: true });
+});
+
+/** Retorna configuração atual (valores sensíveis mascarados). Requer senha no body. */
+app.post('/api/config', (req, res) => {
+  const err = requireConfigPassword(req, res);
+  if (err) return err;
+  const config = getConfigForEdit();
+  return jsonSafe(res, { config });
+});
+
+/** Atualiza .env com os valores enviados. Requer senha no body. */
+app.put('/api/config', (req, res) => {
+  const err = requireConfigPassword(req, res);
+  if (err) return err;
+  const config = req.body?.config;
+  if (!config || typeof config !== 'object') {
+    return res.status(400).json({ error: 'Envie { config: { ... } }.' });
+  }
+  try {
+    updateEnvFile(config);
+    return jsonSafe(res, { ok: true, message: 'Arquivo .env atualizado. Reinicie o servidor para aplicar.' });
+  } catch (e) {
+    console.error('Erro ao atualizar .env:', e);
+    return res.status(500).json({ error: e?.message ?? 'Falha ao gravar .env.' });
+  }
+});
+
+/** Lista jobs que podem ser desfeitos (têm produtos criados com sucesso). */
+app.get('/api/jobs/rollback-candidates', async (req, res) => {
+  try {
+    const mariaPool = app.locals.mariaPool;
+    const limit = Math.min(Number(req.query.limit) || 50, 100);
+    const jobs = await getJobsEligibleForRollback(mariaPool, limit);
+    return jsonSafe(res, { jobs });
+  } catch (err) {
+    console.error('Erro ao buscar jobs para rollback:', err);
+    return res.status(500).json({ error: 'Falha ao buscar jobs para desfazer.' });
+  }
+});
+
+/** Desfaz um job: remove no Oracle EMPRESA_PRODUTO, UNI_PRO e PRODUTO dos produtos criados. */
+app.post('/api/jobs/:jobId/rollback', async (req, res) => {
+  const jobId = Number(req.params.jobId);
+  if (!Number.isFinite(jobId) || jobId <= 0) {
+    return res.status(400).json({ error: 'jobId invalido.' });
+  }
+
+  const requestedBy = req.body?.requestedBy ?? null;
+
+  let oracleConn;
+  try {
+    const mariaPool = app.locals.mariaPool;
+    const oraclePool = app.locals.oraclePool;
+
+    const productIds = await getJobNewProductIds(mariaPool, jobId);
+    if (productIds.length === 0) {
+      return res.status(400).json({
+        error: 'Nenhum produto criado com sucesso neste job para desfazer.'
+      });
+    }
+
+    oracleConn = await getOracleConnection(oraclePool);
+    const result = await executeRollbackOracle(oracleConn, productIds);
+    await oracleConn.commit();
+
+    let auditRollbackOk = true;
+    try {
+      await insertRollbackAudit(mariaPool, {
+        jobId,
+        requestedBy,
+        produtosRemovidos: productIds.length
+      });
+      await clearSuccessAntecessorForJob(mariaPool, jobId);
+    } catch (auditErr) {
+      console.error('Auditoria de rollback (AUDIT_ROLLBACK):', auditErr?.message);
+      auditRollbackOk = false;
+    }
+
+    return jsonSafe(res, {
+      ok: true,
+      jobId,
+      produtosRemovidos: productIds.length,
+      registrosDeletados: result.deleted,
+      erros: result.errors,
+      auditRollbackRegistrado: auditRollbackOk
+    });
+  } catch (err) {
+    if (oracleConn) {
+      try {
+        await oracleConn.rollback();
+      } catch (_) {}
+    }
+    console.error('Erro ao desfazer job:', err);
+    return res.status(500).json({
+      error: err?.message ?? 'Falha ao executar rollback no Oracle.'
+    });
+  } finally {
+    if (oracleConn) {
+      try {
+        await oracleConn.close();
+      } catch (_) {}
+    }
+  }
+});
+
 function parseSpreadsheet(filePath) {
   const workbook = xlsx.readFile(filePath);
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
@@ -243,6 +379,15 @@ app.post('/api/jobs/upload', upload.single('file'), async (req, res) => {
       return res.status(400).json({ error: 'Planilha sem dados.' });
     }
 
+    const layoutResult = validateLayout(rows, normalizedMapping);
+    if (!layoutResult.valid) {
+      await unlink(file.path);
+      return res.status(400).json({
+        error: 'Layout da planilha inválido.',
+        validationErrors: layoutResult.errors
+      });
+    }
+
     const jobId = await createJob(mariaPool, {
       filename: file.originalname,
       uploadedBy: uploadedBy || 'desconhecido',
@@ -289,8 +434,33 @@ async function bootstrap() {
   app.locals.mariaPool = createMariaPool();
   app.locals.oraclePool = await createOraclePool();
 
-  const port = Number(process.env.PORT || 3001);
-  app.listen(port, () => console.log(`API rodando na porta ${port}`));
+  const portBase = Number(process.env.PORT || 3001);
+  const portMax = portBase + 10;
+
+  function tryListen(port) {
+    if (port > portMax) {
+      console.error(`Nenhuma porta livre entre ${portBase} e ${portMax}. Libere uma porta ou altere PORT no .env`);
+      process.exit(1);
+    }
+    const server = app.listen(port, () => {
+      console.log(`API rodando na porta ${port}`);
+      console.log(`  Rotas ativas: GET /api/health, POST /api/config/verify, etc.`);
+      if (port !== portBase) {
+        console.log(`  (Porta ${portBase} estava ocupada.) Se o frontend não conectar, defina VITE_API_BASE=http://localhost:${port} no .env`);
+      }
+    });
+    server.on('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        console.log(`Porta ${port} ocupada, tentando ${port + 1}...`);
+        tryListen(port + 1);
+      } else {
+        console.error(err);
+        process.exit(1);
+      }
+    });
+  }
+
+  tryListen(portBase);
 }
 
 bootstrap().catch((err) => {

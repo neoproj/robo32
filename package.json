@@ -10,7 +10,9 @@
     "dev:server": "node server/index.js",
     "dev:all": "concurrently \"npm:dev\" \"npm:dev:server\"",
     "start": "node server/index.js",
-    "cancel-job": "node cancel-job.js"
+    "cancel-job": "node cancel-job.js",
+    "update-config-password": "node update-config-password.js",
+    "start-server": "node start-server.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

@@ -132,6 +132,14 @@ export async function cloneProdutoOracle(conn, {
   cdSubClaNova,
   somenteEmpresa4 = true
 }) {
+  const antecessor = Number(cdProdutoAntecessor);
+  const esp = Number(cdEspecieNova);
+  const cla = Number(cdClasseNova);
+  const sub = Number(cdSubClaNova);
+  if (!Number.isFinite(antecessor) || antecessor <= 0 || !Number.isFinite(esp) || !Number.isFinite(cla) || !Number.isFinite(sub)) {
+    throw new Error(`Valores inválidos para o Oracle (devem ser números): antecessor=${cdProdutoAntecessor}, especie=${cdEspecieNova}, classe=${cdClasseNova}, sub=${cdSubClaNova}`);
+  }
+
   // Defesa extra (mesmo com pool)
   await prepararSessaoMV(conn, EMPRESA_FIXA);
 
@@ -144,7 +152,7 @@ export async function cloneProdutoOracle(conn, {
     }
   }
 
-  await validarSubClas(conn, cdEspecieNova, cdClasseNova, cdSubClaNova);
+  await validarSubClas(conn, esp, cla, sub);
 
   const resSeq = await conn.execute(`SELECT dbamv.seq_produto.NEXTVAL AS NEXTID FROM dual`);
   const novoCdProduto = resSeq.rows?.[0]?.NEXTID ?? null;
@@ -166,15 +174,15 @@ export async function cloneProdutoOracle(conn, {
     `,
     {
       p_novo_id: novoCdProduto,
-      p_especie: cdEspecieNova,
-      p_classe: cdClasseNova,
-      p_sub_cla: cdSubClaNova,
-      p_antecessor: cdProdutoAntecessor
+      p_especie: esp,
+      p_classe: cla,
+      p_sub_cla: sub,
+      p_antecessor: antecessor
     }
   );
 
   if (rInsProd.rowsAffected !== 1) {
-    throw new Error(`Produto antecessor não encontrado: CD_PRODUTO=${cdProdutoAntecessor}`);
+    throw new Error(`Produto antecessor não encontrado: CD_PRODUTO=${antecessor}`);
   }
 
   // UNI_PRO (barcode NULL conforme regra)
@@ -188,7 +196,7 @@ export async function cloneProdutoOracle(conn, {
       FROM dbamv.uni_pro
      WHERE cd_produto = :p_antecessor
     `,
-    { p_novo_id: novoCdProduto, p_antecessor: cdProdutoAntecessor }
+    { p_novo_id: novoCdProduto, p_antecessor: antecessor }
   );
 
   // EMPRESA_PRODUTO
@@ -204,7 +212,7 @@ export async function cloneProdutoOracle(conn, {
        WHERE cd_produto = :p_antecessor
          AND cd_multi_empresa = :p_emp
       `,
-      { p_novo_id: novoCdProduto, p_antecessor: cdProdutoAntecessor, p_emp: EMPRESA_FIXA }
+      { p_novo_id: novoCdProduto, p_antecessor: antecessor, p_emp: EMPRESA_FIXA }
     );
   } else {
     await conn.execute(
@@ -214,7 +222,7 @@ export async function cloneProdutoOracle(conn, {
         FROM dbamv.empresa_produto
        WHERE cd_produto = :p_antecessor
       `,
-      { p_novo_id: novoCdProduto, p_antecessor: cdProdutoAntecessor }
+      { p_novo_id: novoCdProduto, p_antecessor: antecessor }
     );
   }
 
@@ -229,7 +237,7 @@ export async function cloneProdutoOracle(conn, {
            sn_bloqueio_de_compra = 'S'
      WHERE cd_produto = :p_antecessor
     `,
-    { p_antecessor: cdProdutoAntecessor }
+    { p_antecessor: antecessor }
   );
 
   await conn.execute(
@@ -240,7 +248,7 @@ export async function cloneProdutoOracle(conn, {
      WHERE cd_produto = :p_antecessor
        AND cd_multi_empresa = :p_emp
     `,
-    { p_antecessor: cdProdutoAntecessor, p_emp: EMPRESA_FIXA }
+    { p_antecessor: antecessor, p_emp: EMPRESA_FIXA }
   );
 
   return Number(novoCdProduto);

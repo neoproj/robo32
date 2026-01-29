@@ -11,7 +11,10 @@ const mappingOptions = [
 ];
 
 export default function App() {
-  const apiBase = import.meta.env.VITE_API_BASE || '';
+  // Em desenvolvimento, se VITE_API_BASE não estiver definido, usa a porta do backend (evita depender do proxy)
+  const apiBase =
+    import.meta.env.VITE_API_BASE ||
+    (typeof window !== 'undefined' && window.location?.port === '5173' ? 'http://localhost:3001' : '');
   const [columns, setColumns] = useState([]);
   const [mappings, setMappings] = useState({});
   const [recentJobs, setRecentJobs] = useState([]);
@@ -24,6 +27,34 @@ export default function App() {
   const [statusMessage, setStatusMessage] = useState('');
   const [isUploading, setIsUploading] = useState(false);
   const [historyExpanded, setHistoryExpanded] = useState(false);
+  const [showModalDesfazer, setShowModalDesfazer] = useState(false);
+  const [rollbackCandidates, setRollbackCandidates] = useState([]);
+  const [rollbackSelectedJobId, setRollbackSelectedJobId] = useState('');
+  const [rollbackLoading, setRollbackLoading] = useState(false);
+  const [rollbackSubmitting, setRollbackSubmitting] = useState(false);
+  const [rollbackMessage, setRollbackMessage] = useState('');
+  const [rollbackRequestedBy, setRollbackRequestedBy] = useState('');
+  const [activeTab, setActiveTab] = useState('central');
+  const [showConfigPasswordModal, setShowConfigPasswordModal] = useState(false);
+  const [configPassword, setConfigPassword] = useState('');
+  const [configForm, setConfigForm] = useState({});
+  const [configSaveMessage, setConfigSaveMessage] = useState('');
+  const [configLoading, setConfigLoading] = useState(false);
+  const [configSaving, setConfigSaving] = useState(false);
+  const [configPasswordError, setConfigPasswordError] = useState('');
+  const [configPasswordSession, setConfigPasswordSession] = useState('');
+  const [uploadValidationErrors, setUploadValidationErrors] = useState([]);
+  const CONFIG_KEYS = [
+    { key: 'DB_AUDIT_HOST', label: 'MariaDB — Host' },
+    { key: 'DB_AUDIT_USER', label: 'MariaDB — Usuário' },
+    { key: 'DB_AUDIT_PASS', label: 'MariaDB — Senha', mask: true },
+    { key: 'DB_AUDIT_NAME', label: 'MariaDB — Nome do banco' },
+    { key: 'PORT', label: 'Porta da API' },
+    { key: 'ORA_USER', label: 'Oracle — Usuário' },
+    { key: 'ORA_PASS', label: 'Oracle — Senha', mask: true },
+    { key: 'ORA_CONN_STR', label: 'Oracle — String de conexão' },
+    { key: 'ORA_LIB_DIR', label: 'Oracle — Pasta do Instant Client' }
+  ];
 
   const initialMappings = useMemo(
     () =>
@@ -37,6 +68,31 @@ export default function App() {
   useEffect(() => {
     setMappings(initialMappings);
   }, [initialMappings]);
+
+  useEffect(() => {
+    if (!showModalDesfazer) return;
+    setRollbackMessage('');
+    const fetchCandidates = async () => {
+      try {
+        setRollbackLoading(true);
+        const res = await fetch(`${apiBase}/api/jobs/rollback-candidates?limit=50`);
+        const data = await res.json();
+        if (res.ok && Array.isArray(data.jobs)) {
+          setRollbackCandidates(data.jobs);
+          if (data.jobs.length > 0) {
+            setRollbackSelectedJobId(String(data.jobs[0].id));
+          }
+        } else {
+          setRollbackCandidates([]);
+        }
+      } catch (_) {
+        setRollbackCandidates([]);
+      } finally {
+        setRollbackLoading(false);
+      }
+    };
+    fetchCandidates();
+  }, [showModalDesfazer, apiBase]);
 
   useEffect(() => {
     let isMounted = true;
@@ -134,15 +190,29 @@ export default function App() {
       });
 
       if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error?.error || 'Falha ao iniciar job.');
+        const data = await response.json();
+        const msg = data?.error || 'Falha ao iniciar job.';
+        if (Array.isArray(data?.validationErrors) && data.validationErrors.length > 0) {
+          setUploadValidationErrors(data.validationErrors);
+          const first = data.validationErrors.slice(0, 5);
+          const more = data.validationErrors.length > 5 ? ` ... e mais ${data.validationErrors.length - 5} erro(s).` : '';
+          setStatusMessage(
+            `${msg} (${data.validationErrors.length} erro(s)). Ex.: ${first.map((e) => `Linha ${e.row}${e.field ? `, ${e.field}` : ''}: ${e.message}`).join('; ')}${more}`
+          );
+        } else {
+          setUploadValidationErrors([]);
+          setStatusMessage(msg);
+        }
+        return;
       }
 
       const data = await response.json();
+      setUploadValidationErrors([]);
       setStatusMessage(`Job ${data.jobId} iniciado. Aguarde o processamento.`);
       setFile(null);
     } catch (err) {
-      setStatusMessage(err.message);
+      setUploadValidationErrors([]);
+      setStatusMessage(err?.message || 'Erro ao enviar.');
     } finally {
       setIsUploading(false);
     }
@@ -162,8 +232,198 @@ export default function App() {
     return '';
   };
 
+  const handleConfirmRollback = async () => {
+    const jobId = rollbackSelectedJobId ? Number(rollbackSelectedJobId) : 0;
+    if (!jobId) {
+      setRollbackMessage('Selecione um job.');
+      return;
+    }
+    try {
+      setRollbackSubmitting(true);
+      setRollbackMessage('');
+      const res = await fetch(`${apiBase}/api/jobs/${jobId}/rollback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requestedBy: rollbackRequestedBy || null })
+      });
+      const data = await res.json();
+      if (res.ok && data.ok) {
+        setRollbackMessage(
+          `Desfeito: ${data.produtosRemovidos} produto(s) removido(s), ${data.registrosDeletados} registro(s) no Oracle.`
+        );
+        setTimeout(() => {
+          setShowModalDesfazer(false);
+        }, 2000);
+      } else {
+        setRollbackMessage(data?.error || 'Falha ao desfazer.');
+      }
+    } catch (err) {
+      setRollbackMessage(err?.message || 'Erro ao desfazer.');
+    } finally {
+      setRollbackSubmitting(false);
+    }
+  };
+
+  const openConfigTab = () => {
+    setConfigPasswordError('');
+    setConfigPassword('');
+    setShowConfigPasswordModal(true);
+  };
+
+  const handleConfigPasswordSubmit = async (e) => {
+    e?.preventDefault();
+    const pwd = configPassword.trim();
+    if (!pwd) {
+      setConfigPasswordError('Digite a senha.');
+      return;
+    }
+    try {
+      setConfigLoading(true);
+      setConfigPasswordError('');
+      const res = await fetch(`${apiBase}/api/config/verify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pwd })
+      });
+      let data;
+      try {
+        data = await res.json();
+      } catch (_) {
+        setConfigPasswordError(
+          res.status === 404
+            ? 'API não encontrada. Verifique se o backend está rodando (npm run dev:server) na porta 3001.'
+            : 'Resposta inválida do servidor. Verifique se o backend está rodando.'
+        );
+        return;
+      }
+      if (!res.ok) {
+        setConfigPasswordError(data?.error || 'Senha incorreta.');
+        return;
+      }
+      const configRes = await fetch(`${apiBase}/api/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pwd })
+      });
+      let configData;
+      try {
+        configData = await configRes.json();
+      } catch (_) {
+        setConfigPasswordError('Resposta inválida ao carregar configuração. Verifique o backend.');
+        return;
+      }
+      if (!configRes.ok) {
+        setConfigPasswordError(configData?.error || 'Falha ao carregar configuração.');
+        return;
+      }
+      setConfigForm(configData.config || {});
+      setConfigPasswordSession(pwd);
+      setShowConfigPasswordModal(false);
+      setActiveTab('config');
+    } catch (err) {
+      setConfigPasswordError(err?.message || 'Erro de conexão. Verifique se o backend está rodando.');
+    } finally {
+      setConfigLoading(false);
+    }
+  };
+
+  const handleConfigFormChange = (key, value) => {
+    setConfigForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const handleConfigSave = async (e) => {
+    e?.preventDefault();
+    const pwd = configPasswordSession;
+    if (!pwd) {
+      setConfigSaveMessage('Sessão expirada. Abra Configuração novamente e digite a senha.');
+      return;
+    }
+    try {
+      setConfigSaving(true);
+      setConfigSaveMessage('');
+      const res = await fetch(`${apiBase}/api/config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pwd, config: configForm })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setConfigSaveMessage(data?.message || 'Configuração salva. Reinicie o servidor para aplicar.');
+      } else {
+        setConfigSaveMessage(data?.error || 'Falha ao salvar.');
+      }
+    } catch (err) {
+      setConfigSaveMessage(err?.message || 'Erro ao salvar.');
+    } finally {
+      setConfigSaving(false);
+    }
+  };
+
   return (
     <div className="page">
+      <nav className="tabs-nav">
+        <button
+          type="button"
+          className={`tab ${activeTab === 'central' ? 'active' : ''}`}
+          onClick={() => { setActiveTab('central'); setConfigPasswordSession(''); }}
+        >
+          Central
+        </button>
+        <button
+          type="button"
+          className={`tab ${activeTab === 'config' ? 'active' : ''}`}
+          onClick={openConfigTab}
+          title="Configuração (exige senha)"
+          aria-label="Configuração"
+        >
+          <span className="tab-icon" aria-hidden>⚙</span>
+          Configuração
+        </button>
+      </nav>
+
+      {activeTab === 'config' ? (
+        <section className="panel wide config-panel">
+          <div className="panel-header">
+            <h2>Conexão com os bancos</h2>
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => { setActiveTab('central'); setConfigPasswordSession(''); }}
+            >
+              Voltar à Central
+            </button>
+          </div>
+          <p className="config-hint">
+            Altere os valores e clique em Salvar para atualizar o arquivo .env. Reinicie o servidor para aplicar.
+          </p>
+          <form className="config-form" onSubmit={handleConfigSave}>
+            {CONFIG_KEYS.map(({ key, label, mask }) => (
+              <div className="config-row" key={key}>
+                <label htmlFor={`config-${key}`}>{label}</label>
+                <input
+                  id={`config-${key}`}
+                  type={mask ? 'password' : 'text'}
+                  value={configForm[key] === '[MASKED]' ? '' : (configForm[key] ?? '')}
+                  onChange={(e) => handleConfigFormChange(key, e.target.value)}
+                  placeholder={configForm[key] === '[MASKED]' ? 'Deixe em branco para manter' : ''}
+                  autoComplete={mask ? 'off' : 'on'}
+                />
+              </div>
+            ))}
+            <div className="config-actions">
+              <button type="submit" className="primary" disabled={configSaving}>
+                {configSaving ? 'Salvando...' : 'Salvar'}
+              </button>
+            </div>
+            {configSaveMessage && (
+              <p className={`config-save-msg ${configSaveMessage.includes('Reinicie') ? 'ok' : 'err'}`}>
+                {configSaveMessage}
+              </p>
+            )}
+          </form>
+        </section>
+      ) : (
+        <>
       <header className="hero">
         <div>
           <p className="eyebrow">Robo32</p>
@@ -202,9 +462,18 @@ export default function App() {
         <div className="panel">
           <div className="panel-header">
             <h2>Dashboard de Jobs</h2>
-            <button className="ghost" onClick={() => setHistoryExpanded((prev) => !prev)}>
-              {historyExpanded ? 'Ver menos' : 'Ver historico completo'}
-            </button>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              <button className="ghost" onClick={() => setHistoryExpanded((prev) => !prev)}>
+                {historyExpanded ? 'Ver menos' : 'Ver historico completo'}
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => setShowModalDesfazer(true)}
+              >
+                Desfazer job
+              </button>
+            </div>
           </div>
           <div className="job-list">
             {recentJobs.length === 0 && <p className="job-meta">Nenhum upload registrado.</p>}
@@ -253,6 +522,20 @@ export default function App() {
               />
             </label>
             {statusMessage && <p className="status-message">{statusMessage}</p>}
+            {uploadValidationErrors.length > 0 && (
+              <ul className="upload-validation-errors" aria-live="polite">
+                {uploadValidationErrors.slice(0, 15).map((e, i) => (
+                  <li key={i}>
+                    Linha {e.row}
+                    {e.field ? `, ${e.field}` : ''}: {e.message}
+                    {e.value ? ` (valor: "${e.value}")` : ''}
+                  </li>
+                ))}
+                {uploadValidationErrors.length > 15 && (
+                  <li className="job-meta">... e mais {uploadValidationErrors.length - 15} erro(s). Corrija a planilha e envie novamente.</li>
+                )}
+              </ul>
+            )}
           </div>
           <div className="mapping-table">
             <div className="mapping-head">
@@ -340,6 +623,125 @@ export default function App() {
           </div>
         </div>
       </section>
+        </>
+      )}
+
+      {showModalDesfazer && (
+        <div
+          className="modal-overlay"
+          onClick={(e) => e.target === e.currentTarget && setShowModalDesfazer(false)}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="modal-desfazer-title"
+        >
+          <div className="modal-box">
+            <h3 id="modal-desfazer-title">Desfazer job</h3>
+            <p>Escolha o job que deseja desfazer. Serão removidos no Oracle os produtos criados (EMPRESA_PRODUTO, UNI_PRO, PRODUTO).</p>
+            {rollbackLoading ? (
+              <p className="job-meta">Carregando jobs...</p>
+            ) : rollbackCandidates.length === 0 ? (
+              <p className="job-meta">Nenhum job com produtos criados para desfazer.</p>
+            ) : (
+              <>
+                <label htmlFor="rollback-job-select">Job</label>
+                <select
+                  id="rollback-job-select"
+                  value={rollbackSelectedJobId}
+                  onChange={(e) => setRollbackSelectedJobId(e.target.value)}
+                  disabled={rollbackSubmitting}
+                >
+                  {rollbackCandidates.map((job) => (
+                    <option key={job.id} value={job.id}>
+                      JOB-{job.id} — {job.filename} ({Number(job.produtos_criados ?? 0)} produto(s))
+                    </option>
+                  ))}
+                </select>
+                <label htmlFor="rollback-requested-by">Solicitante da remoção</label>
+                <input
+                  id="rollback-requested-by"
+                  type="text"
+                  value={rollbackRequestedBy}
+                  onChange={(e) => setRollbackRequestedBy(e.target.value)}
+                  placeholder="Nome de quem está solicitando a remoção"
+                  disabled={rollbackSubmitting}
+                  style={{ width: '100%', marginBottom: '16px', padding: '10px 14px', borderRadius: '12px', border: '1px solid rgba(0,0,0,0.2)' }}
+                />
+                <div className="modal-actions">
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => setShowModalDesfazer(false)}
+                    disabled={rollbackSubmitting}
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="button"
+                    className="danger"
+                    onClick={handleConfirmRollback}
+                    disabled={rollbackSubmitting}
+                  >
+                    {rollbackSubmitting ? 'Desfazendo...' : 'Confirmar desfazer'}
+                  </button>
+                </div>
+              </>
+            )}
+            {rollbackMessage && (
+              <p
+                className={`modal-rollback-message ${
+                  rollbackMessage.startsWith('Desfeito') ? 'ok' : 'err'
+                }`}
+              >
+                {rollbackMessage}
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {showConfigPasswordModal && (
+        <div
+          className="modal-overlay"
+          onClick={(e) => e.target === e.currentTarget && setShowConfigPasswordModal(false)}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="modal-config-password-title"
+        >
+          <div className="modal-box">
+            <h3 id="modal-config-password-title">Acesso à Configuração</h3>
+            <p>Digite a senha de administrador para editar a conexão com os bancos e atualizar o .env.</p>
+            <form onSubmit={handleConfigPasswordSubmit}>
+              <label htmlFor="config-password-input">Senha</label>
+              <input
+                id="config-password-input"
+                type="password"
+                value={configPassword}
+                onChange={(e) => { setConfigPassword(e.target.value); setConfigPasswordError(''); }}
+                placeholder="Senha de administrador"
+                disabled={configLoading}
+                autoFocus
+                className="config-password-input"
+              />
+              {configPasswordError && (
+                <p className="modal-rollback-message err">{configPasswordError}</p>
+              )}
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => setShowConfigPasswordModal(false)}
+                  disabled={configLoading}
+                >
+                  Cancelar
+                </button>
+                <button type="submit" className="primary" disabled={configLoading}>
+                  {configLoading ? 'Verificando...' : 'Entrar'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
